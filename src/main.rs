@@ -19,6 +19,13 @@ enum ModeArg {
     TpuUdp,
 }
 
+#[derive(Clone, Debug, ValueEnum)]
+enum FeeProfileArg {
+    Safe,
+    Competitive,
+    Aggressive,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "solana_leader_cache_bench")]
 struct Args {
@@ -49,13 +56,36 @@ struct Args {
 
     #[arg(long, default_value = "confirmed")]
     commitment: String,
+
+    // ----------------------------
+    // Priority fee / Compute Budget
+    // ----------------------------
+
+    /// Fee profile (only used if --cu-limit or --cu-price are NOT provided)
+    #[arg(long, value_enum, default_value = "competitive")]
+    fee_profile: FeeProfileArg,
+
+    /// Compute Unit limit override (if set, overrides profile)
+    #[arg(long)]
+    cu_limit: Option<u32>,
+
+    /// Compute Unit price in micro-lamports per CU override (if set, overrides profile)
+    #[arg(long)]
+    cu_price: Option<u64>,
+}
+
+fn profile_defaults(profile: &FeeProfileArg) -> (u32, u64) {
+    match profile {
+        // Для простого transfer это достаточно, и почти всегда лэндится нормально
+        FeeProfileArg::Safe => (50_000, 5_000),
+        FeeProfileArg::Competitive => (50_000, 25_000),
+        FeeProfileArg::Aggressive => (50_000, 120_000),
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     let args = Args::parse();
 
@@ -65,9 +95,23 @@ async fn main() -> Result<()> {
             .map_err(|_| anyhow!("keypair not provided. Use --keypair <path> or set KEYPAIR_PATH env var"))?,
     };
 
+    // Resolve CU params: explicit flags override profile
+    let (prof_limit, prof_price) = profile_defaults(&args.fee_profile);
+    let cu_limit = args.cu_limit.unwrap_or(prof_limit);
+    let cu_price = args.cu_price.unwrap_or(prof_price);
+
     info!(
-        "rpc_url={} mode={:?} iters={} fanout={} commitment={} to={} lamports={}",
-        args.rpc_url, args.mode, args.iters, args.fanout, args.commitment, args.to, args.lamports
+        "rpc_url={} mode={:?} iters={} fanout={} commitment={} to={} lamports={} fee_profile={:?} cu_limit={} cu_price={}µLamports/CU",
+        args.rpc_url,
+        args.mode,
+        args.iters,
+        args.fanout,
+        args.commitment,
+        args.to,
+        args.lamports,
+        args.fee_profile,
+        cu_limit,
+        cu_price
     );
 
     let rpc = RpcClient::new(args.rpc_url.clone());
@@ -101,6 +145,10 @@ async fn main() -> Result<()> {
 
         // ВАЖНО: resend для UDP
         resend_every: Duration::from_millis(400),
+
+        // NEW: compute budget / priority fee knobs
+        cu_limit,
+        cu_price_micro_lamports: cu_price,
     };
 
     run_bench(&rpc, &cache, bench_cfg).await?;

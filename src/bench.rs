@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use crate::cache::LeaderCache;
 use crate::rpc::RpcClient;
 use crate::tpu_sender::send_udp_tx_multi;
-use crate::tx_builder::build_transfer_tx;
+use crate::tx_builder::build_transfer_tx_with_priority;
 
 #[derive(Debug, Clone)]
 pub enum SendMode {
@@ -29,6 +29,10 @@ pub struct BenchConfig {
 
     pub leaders_fanout: usize,  // how many next leaders (0 => only current)
     pub resend_every: Duration, // resend interval for TPU
+
+    // NEW: compute budget / priority fee
+    pub cu_limit: u32,
+    pub cu_price_micro_lamports: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -92,8 +96,14 @@ pub async fn run_bench(rpc: &RpcClient, cache: &LeaderCache, cfg: BenchConfig) -
     let mut results: Vec<BenchResult> = Vec::with_capacity(cfg.iters);
 
     info!(
-        "bench start: mode={:?} iters={} fanout={} min_commitment={} resend_every={:?}",
-        cfg.mode, cfg.iters, cfg.leaders_fanout, cfg.min_commitment, cfg.resend_every
+        "bench start: mode={:?} iters={} fanout={} min_commitment={} resend_every={:?} cu_limit={} cu_price={}µLamports/CU",
+        cfg.mode,
+        cfg.iters,
+        cfg.leaders_fanout,
+        cfg.min_commitment,
+        cfg.resend_every,
+        cfg.cu_limit,
+        cfg.cu_price_micro_lamports
     );
 
     for i in 0..cfg.iters {
@@ -103,12 +113,14 @@ pub async fn run_bench(rpc: &RpcClient, cache: &LeaderCache, cfg: BenchConfig) -
         let blockhash = bh.value.blockhash.clone();
         let last_valid_bh = bh.value.last_valid_block_height;
 
-        // 2) build tx
-        let built = build_transfer_tx(
+        // 2) build tx (WITH priority fee)
+        let built = build_transfer_tx_with_priority(
             &cfg.keypair_path,
             &cfg.to_pubkey,
             cfg.lamports,
             &blockhash,
+            cfg.cu_limit,
+            cfg.cu_price_micro_lamports,
         )?;
         let sig = built.signature.clone();
 
@@ -123,7 +135,11 @@ pub async fn run_bench(rpc: &RpcClient, cache: &LeaderCache, cfg: BenchConfig) -
             SendMode::TpuUdp => {
                 let addrs = current_tpu_addrs(cache, cfg.leaders_fanout).await;
                 if addrs.is_empty() {
-                    warn!("[{}/{}] no TPU addrs available (tpu/tpuForwards). Skipping.", i + 1, cfg.iters);
+                    warn!(
+                        "[{}/{}] no TPU addrs available (tpu/tpuForwards). Skipping.",
+                        i + 1,
+                        cfg.iters
+                    );
                     results.push(BenchResult {
                         ok: false,
                         slot_delta: None,
